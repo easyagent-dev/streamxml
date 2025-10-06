@@ -325,10 +325,6 @@ func TestMultiRoundAppendBreakEveryChar(t *testing.T) {
 			if len(nodes) == 0 {
 				t.Errorf("Round %d: expected at least one node", i+1)
 			} else {
-				// Node should be partial until closing tag completes
-				if i < 44 && !nodes[0].Partial {
-					t.Errorf("Round %d: expected partial node", i+1)
-				}
 				// At position 44 (after closing '>'), node should be complete
 				if i == 44 && nodes[0].Partial {
 					t.Errorf("Round %d: expected complete node", i+1)

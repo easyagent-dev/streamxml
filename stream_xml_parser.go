@@ -60,7 +60,7 @@ func NewStreamXmlParserWithConfig(config ParserConfig) *StreamXmlParser {
 		config = DefaultConfig()
 	}
 
-	return &StreamXmlParser{
+	parser := &StreamXmlParser{
 		tokenizer:          NewStreamXmlTokenizerWithConfig(config),
 		astNodes:           make([]ASTNode, 0),
 		xmlStack:           make([]*XmlNode, 0),
@@ -72,6 +72,13 @@ func NewStreamXmlParserWithConfig(config ParserConfig) *StreamXmlParser {
 		currentPartialNode: nil,
 		partialNodeIndex:   -1,
 	}
+
+	// Apply allowed elements from config to tokenizer
+	if config.AllowedElements != nil {
+		parser.tokenizer.SetAllowedElements(config.AllowedElements)
+	}
+
+	return parser
 }
 
 // SetAllowedElements configures which XML elements should be treated as XML tokens.
