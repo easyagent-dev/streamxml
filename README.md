@@ -1,15 +1,15 @@
 # StreamXML Parser
 
-A Go library for parsing streaming mixed text and XML content, particularly useful for processing LLM (Large Language Model) stream outputs that contain both text and XML tags.
+A Go library for parsing streaming mixed text and XML content, designed for LLMs that don't support structured JSON output (like Claude Sonnet). Enables tool-calling patterns using XML tags in streaming responses.
 
 ## Features
 
-- **Stateful Tokenizer**: Supports multi-round `Append()` operations with state preservation
-- **Partial Token Support**: Returns partial tokens for incomplete XML tags
-- **AST Generation**: Builds an Abstract Syntax Tree for mixed text/XML content
-- **Incremental Updates**: AST is automatically updated as more data is appended
-- **Multiple XML Fragments**: Supports parsing multiple XML nodes in a single stream
-- **Incomplete XML Handling**: Gracefully handles incomplete XML syntax with partial nodes
+- **LLM-Optimized**: Built for models that output XML instead of JSON for function/tool calling
+- **Streaming Support**: Handles real-time stream parsing with state preservation across chunks
+- **Partial XML Handling**: Returns partial tokens for incomplete tags as data streams in
+- **Mixed Content**: Parses both plain text and XML nodes in a single stream
+- **AST Generation**: Builds an Abstract Syntax Tree with automatic incremental updates
+- **Multiple Elements**: Supports parsing multiple XML fragments in one stream
 
 ## Installation
 
@@ -21,32 +21,82 @@ go get github.com/easymvp/streamxml
 
 ### Basic Example
 
+See full example: [examples/basic/main.go](examples/basic/main.go)
+
 ```go
 package main
 
 import (
     "fmt"
-    "github.com/easymvp/streamxml"
+    "github.com/easyagent-dev/streamxml"
 )
 
 func main() {
+    // Create a new parser
     parser := streamxml.NewStreamXmlParser()
-    
-    // Stream data in chunks
+
+    // Simulate streaming data in chunks
     parser.Append("I must call tools to get more information.\n")
     parser.Append("<use-tool name=\"get_info\">\n")
     parser.Append("{\"name\":\"product\"}\n")
     parser.Append("</use-tool>")
-    
+
     // Get all text (excluding XML tags)
     text, _ := parser.GetText()
-    fmt.Println("Text:", text)
-    
+    fmt.Printf("Text content: %q\n", text)
+
     // Get all XML nodes
     nodes, _ := parser.GetXmlNodes()
+    fmt.Printf("Found %d XML node(s)\n", len(nodes))
     for _, node := range nodes {
-        fmt.Printf("XML Node: name=%s, partial=%v, content=%s\n", 
-            node.Name, node.Partial, node.Content)
+        fmt.Printf("  Name: %s\n", node.Name)
+        fmt.Printf("  Partial: %v\n", node.Partial)
+        fmt.Printf("  Attributes: %v\n", node.Attributes)
+        fmt.Printf("  Content: %q\n", node.Content)
+    }
+}
+```
+
+### Advanced Example with Configuration
+
+See full example: [examples/advanced/main.go](examples/advanced/main.go)
+
+```go
+package main
+
+import (
+    "fmt"
+    "github.com/easyagent-dev/streamxml"
+)
+
+func main() {
+    // Create a custom configuration
+    config := streamxml.ParserConfig{
+        MaxDepth:               50,
+        MaxBufferSize:          5 * 1024 * 1024, // 5MB
+        AllowedElements:        []string{"tool", "thinking"},
+        BufferCleanupThreshold: 512,
+    }
+
+    // Create parser with custom configuration
+    parser := streamxml.NewStreamXmlParserWithConfig(config)
+
+    // Stream mixed content with element filtering
+    parser.Append("Text before\n")
+    parser.Append("<tool name=\"search\">query text</tool>\n")
+    parser.Append("<disallowed>This will be treated as text</disallowed>\n")
+    parser.Append("<thinking>Analyzing...</thinking>\n")
+    parser.Append("Text after")
+
+    // Get text content
+    text, _ := parser.GetText()
+    fmt.Printf("Text content: %q\n", text)
+
+    // Get XML nodes (only allowed elements are parsed as XML)
+    nodes, _ := parser.GetXmlNodes()
+    fmt.Printf("Found %d XML node(s)\n", len(nodes))
+    for _, node := range nodes {
+        fmt.Printf("  <%s> content=%q\n", node.Name, node.Content)
     }
 }
 ```
@@ -195,4 +245,4 @@ The parser generates:
 
 ## License
 
-MIT License - see LICENSE file for details.
+Apache License - see LICENSE file for details.
