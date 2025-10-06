@@ -2,6 +2,7 @@ package streamxml
 
 import (
 	"strings"
+	"sync"
 )
 
 type ASTNodeType int
@@ -28,12 +29,14 @@ type XmlNode struct {
 }
 
 type StreamXmlParser struct {
+	mu             sync.RWMutex
 	tokenizer      *StreamXmlTokenizer
 	astNodes       []ASTNode
 	xmlStack       []*XmlNode
 	textParts      []string
 	currentContent strings.Builder
 	depth          int
+	config         ParserConfig
 
 	// Tag reconstruction state
 	collectingTag bool
@@ -46,12 +49,24 @@ type StreamXmlParser struct {
 }
 
 func NewStreamXmlParser() *StreamXmlParser {
+	config := DefaultConfig()
+	return NewStreamXmlParserWithConfig(config)
+}
+
+// NewStreamXmlParserWithConfig creates a new parser with custom configuration
+func NewStreamXmlParserWithConfig(config ParserConfig) *StreamXmlParser {
+	if err := config.Validate(); err != nil {
+		// Use default config if invalid
+		config = DefaultConfig()
+	}
+
 	return &StreamXmlParser{
-		tokenizer:          NewStreamXmlTokenizer(),
+		tokenizer:          NewStreamXmlTokenizerWithConfig(config),
 		astNodes:           make([]ASTNode, 0),
 		xmlStack:           make([]*XmlNode, 0),
 		textParts:          make([]string, 0),
 		depth:              0,
+		config:             config,
 		collectingTag:      false,
 		tagTokens:          make([]*Token, 0),
 		currentPartialNode: nil,
@@ -63,18 +78,27 @@ func NewStreamXmlParser() *StreamXmlParser {
 // If nil, all elements are allowed (default behavior).
 // If empty slice, no elements are allowed (all tags treated as text).
 // If set with elements, only those elements will be tokenized as XML; others will be treated as text.
+// This method is thread-safe.
 func (p *StreamXmlParser) SetAllowedElements(elements []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.tokenizer.SetAllowedElements(elements)
 }
 
 // Append adds new data to the parser and processes new tokens incrementally
-func (p *StreamXmlParser) Append(data string) {
-	p.tokenizer.Append(data)
-	p.processNewTokens()
+// This method is thread-safe.
+func (p *StreamXmlParser) Append(data string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if err := p.tokenizer.Append(data); err != nil {
+		return err
+	}
+	return p.processNewTokens()
 }
 
 // processNewTokens processes new tokens from the tokenizer incrementally
-func (p *StreamXmlParser) processNewTokens() {
+func (p *StreamXmlParser) processNewTokens() error {
 	for {
 		token := p.tokenizer.NextToken()
 		if token == nil {
@@ -82,8 +106,11 @@ func (p *StreamXmlParser) processNewTokens() {
 			break
 		}
 
-		p.processToken(token)
+		if err := p.processToken(token); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // getValue extracts the value from buffer using token positions
@@ -96,7 +123,7 @@ func (p *StreamXmlParser) getValue(token *Token) string {
 }
 
 // processToken processes a single token and updates the AST incrementally
-func (p *StreamXmlParser) processToken(token *Token) {
+func (p *StreamXmlParser) processToken(token *Token) error {
 	switch token.Type {
 	case TokenText:
 		value := p.getValue(token)
@@ -133,7 +160,9 @@ func (p *StreamXmlParser) processToken(token *Token) {
 		// Tag is complete
 		if p.collectingTag {
 			p.tagTokens = append(p.tagTokens, token)
-			p.processCompleteTag()
+			if err := p.processCompleteTag(); err != nil {
+				return err
+			}
 			p.collectingTag = false
 			p.tagTokens = nil
 		}
@@ -200,13 +229,14 @@ func (p *StreamXmlParser) processToken(token *Token) {
 			}
 		}
 	}
+	return nil
 }
 
 // processCompleteTag processes a complete tag (reconstructed from tokens)
-func (p *StreamXmlParser) processCompleteTag() {
+func (p *StreamXmlParser) processCompleteTag() error {
 	if len(p.tagTokens) < 3 {
 		// Invalid tag (need at least <, name, >)
-		return
+		return nil
 	}
 
 	// Determine tag type
@@ -346,6 +376,11 @@ func (p *StreamXmlParser) processCompleteTag() {
 					p.xmlStack = append(p.xmlStack, p.currentPartialNode)
 					p.currentContent.Reset()
 					p.depth++
+
+					// Check max depth
+					if p.depth > p.config.MaxDepth {
+						return ErrMaxDepthExceeded
+					}
 				}
 			} else {
 				// Top-level tag - create new XML node
@@ -371,6 +406,11 @@ func (p *StreamXmlParser) processCompleteTag() {
 				p.xmlStack = append(p.xmlStack, xmlNode)
 				p.currentContent.Reset()
 				p.depth++
+
+				// Check max depth
+				if p.depth > p.config.MaxDepth {
+					return ErrMaxDepthExceeded
+				}
 			}
 		} else {
 			// Nested tag - add to content as raw text
@@ -380,8 +420,14 @@ func (p *StreamXmlParser) processCompleteTag() {
 				p.xmlStack[len(p.xmlStack)-1].Content = p.currentContent.String()
 			}
 			p.depth++
+
+			// Check max depth
+			if p.depth > p.config.MaxDepth {
+				return ErrMaxDepthExceeded
+			}
 		}
 	}
+	return nil
 }
 
 // reconstructTag reconstructs the full tag string from collected tokens
@@ -415,7 +461,11 @@ func (p *StreamXmlParser) reconstructTag() string {
 }
 
 // GetText returns all accumulated text (excluding XML tags)
+// This method is thread-safe.
 func (p *StreamXmlParser) GetText() (string, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
 	var result strings.Builder
 
 	for _, node := range p.astNodes {
@@ -428,7 +478,11 @@ func (p *StreamXmlParser) GetText() (string, error) {
 }
 
 // GetXmlNode returns the first XML node (complete or partial)
+// This method is thread-safe.
 func (p *StreamXmlParser) GetXmlNode() (*XmlNode, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
 	for _, node := range p.astNodes {
 		if node.Type == ASTNodeXml && node.XmlNode != nil {
 			return node.XmlNode, nil
@@ -438,7 +492,11 @@ func (p *StreamXmlParser) GetXmlNode() (*XmlNode, error) {
 }
 
 // GetXmlNodes returns all XML nodes (complete and partial)
+// This method is thread-safe.
 func (p *StreamXmlParser) GetXmlNodes() ([]*XmlNode, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
 	nodes := make([]*XmlNode, 0)
 
 	for _, node := range p.astNodes {
@@ -451,8 +509,15 @@ func (p *StreamXmlParser) GetXmlNodes() ([]*XmlNode, error) {
 }
 
 // GetAST returns the complete AST
+// This method is thread-safe.
 func (p *StreamXmlParser) GetAST() []ASTNode {
-	return p.astNodes
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	// Return a copy to prevent external modification
+	result := make([]ASTNode, len(p.astNodes))
+	copy(result, p.astNodes)
+	return result
 }
 
 // extractPartialTagName tries to extract tag name from incomplete tag

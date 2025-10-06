@@ -27,10 +27,12 @@ type Token struct {
 }
 
 type StreamXmlTokenizer struct {
-	buffer          string
-	position        int
-	allowedElements map[string]bool
-	consumed        int
+	buffer                 string
+	position               int
+	allowedElements        map[string]bool
+	consumed               int
+	bufferCleanupThreshold int
+	maxBufferSize          int
 
 	// State tracking
 	inTag        bool
@@ -48,13 +50,21 @@ type StreamXmlTokenizer struct {
 }
 
 func NewStreamXmlTokenizer() *StreamXmlTokenizer {
+	config := DefaultConfig()
+	return NewStreamXmlTokenizerWithConfig(config)
+}
+
+// NewStreamXmlTokenizerWithConfig creates a new tokenizer with custom configuration
+func NewStreamXmlTokenizerWithConfig(config ParserConfig) *StreamXmlTokenizer {
 	return &StreamXmlTokenizer{
-		buffer:          "",
-		position:        0,
-		allowedElements: nil, // nil means all elements are allowed
-		consumed:        0,
-		pendingTokens:   make([]*Token, 0),
-		pendingIndex:    0,
+		buffer:                 "",
+		position:               0,
+		allowedElements:        nil, // nil means all elements are allowed
+		consumed:               0,
+		bufferCleanupThreshold: config.BufferCleanupThreshold,
+		maxBufferSize:          config.MaxBufferSize,
+		pendingTokens:          make([]*Token, 0),
+		pendingIndex:           0,
 	}
 }
 
@@ -76,10 +86,20 @@ func (t *StreamXmlTokenizer) SetAllowedElements(elements []string) {
 }
 
 // Append adds more data to the tokenizer
-func (t *StreamXmlTokenizer) Append(data string) {
+func (t *StreamXmlTokenizer) Append(data string) error {
+	// Check buffer size limit
+	if len(t.buffer)+len(data) > t.maxBufferSize {
+		return ErrMaxBufferSizeExceeded
+	}
+
 	t.buffer += data
 	// Reset incomplete flag when new data arrives
 	t.incompleteReturned = false
+
+	// Cleanup buffer if threshold exceeded
+	t.cleanupBuffer()
+
+	return nil
 }
 
 // GetBuffer returns the current buffer for value extraction
@@ -217,12 +237,39 @@ func (t *StreamXmlTokenizer) tryCompleteTag() bool {
 			t.inTag = false
 			t.tagBuffer.Reset()
 			t.consumed = t.position
+			t.cleanupBuffer()
 			return true
 		}
 	}
 
 	// Tag is incomplete
 	return false
+}
+
+// cleanupBuffer removes consumed data from buffer to prevent memory growth
+func (t *StreamXmlTokenizer) cleanupBuffer() {
+	if t.consumed >= t.bufferCleanupThreshold {
+		// Remove consumed portion of buffer
+		t.buffer = t.buffer[t.consumed:]
+
+		// Adjust all position offsets
+		t.position -= t.consumed
+		if t.tagStartPos >= t.consumed {
+			t.tagStartPos -= t.consumed
+		}
+		if t.textStartPos >= t.consumed {
+			t.textStartPos -= t.consumed
+		}
+
+		// Adjust pending token positions
+		for i := range t.pendingTokens {
+			t.pendingTokens[i].Start -= t.consumed
+			t.pendingTokens[i].End -= t.consumed
+		}
+
+		// Reset consumed counter
+		t.consumed = 0
+	}
 }
 
 func (t *StreamXmlTokenizer) parseAndEmitTag(tagContent string) {
